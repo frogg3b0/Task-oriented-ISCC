@@ -91,6 +91,76 @@ Ans:
 
 
 
-#### Step 2.
-#### Step 3.
-#### Step 4.
+#### Step 2. Data Cleaning
+因為接收訊號的 矩陣 X(m) 包含有用的訊號（人體反射）與干擾訊號（牆壁、桌椅反射，為了提取有用訊號，我們先進行
+* 解調（dechirp）--> OFDM: Remove CP + *N* point DFT，還原頻域資料
+* 取共軛（conjugate）處理得到 X̃(m) --> 相同
+* 接著對 X̃(m) 進行 SVD 分解 --> 相同
+* 將前 r−1 個主要成分（可能是干擾）移除後，剩下的訊號 Y(m) 被視為「去雜訊後」的資訊。(留下微弱但重要的動態訊號)
+
+#### Step 3. Data Transformation (Short-time Fourier transform)
+使用短時傅立葉轉換（STFT），透過**長度為 W 的滑動窗(Kaiser window**)來產生同時具有時間與頻率特徵的表示。  
+* Kaiser window: 窗長 128 點，相當於 0.128 秒，滑動時間間隔為 1 毫秒
+* Z(m) = STFT (y(m))
+<img width="421" height="247" alt="image" src="https://github.com/user-attachments/assets/2d59b616-7ef3-4e57-ba40-b7a9e3a2660a" />
+
+#### Step 4. Data Classification
+使用 ResNet 架構作為分類骨幹，包含 5 個殘差模組與一個 softmax 輸出層。  
+* 每個殘差模組包含 6 層：標準化、激活函數、卷積，共兩輪
+* 每個模組會學習輸入與輸出之間的差值
+* 最終輸出為預測的人體動作類別 m̂
+
+
+***
+## IV. PROPOSED BENCHMARK METRICS
+### 訓練資料如何取得?
+訓練機器學習模型（如 CNN/ResNet）需要大量資料，但在真實無線感測系統中，實驗蒐集資料的成本與耗時都非常高。  
+* 透過模擬「無線通道模型」來合成資料集，是一個可行的解法。
+* 但是當我們用模擬器來合成資料時，「什麼樣的模擬器才算夠好？」
+
+### 通訊和雷達用途的訓練資料大不同
+傳統 channel metrics（如衰減、延遲、AoA）不適合用來評估感測任務的模擬器效果。原因在於這些指標只反映通道「靜態特性」，但無法表現「動作變化」
+* 為了找出針對「無線感測」更適合的評估指標，作者設計並實作了一個真實實驗：利用 USRP RIO 平台，在會議室中收集 radar 資料
+* Fig.2 展示了系統架構
+* Fig.3 展示 radar 回波經過 STFT 轉換後的影像（即 spectrogram）
+    * micro-Doppler consistency：指模擬器生成的資料中，必須真實反映人體如四肢擺動等「非剛體」動作，在 spectrogram 上出現週期性曲線（如走路時手臂擺動）。
+    * sensing uncertainty：雷達觀測常伴隨不確定性（例如衣服飄動、肢體變形等），模擬器也應能在一定程度上保留這種「不可預測性」。
+
+<img width="443" height="350" alt="image" src="https://github.com/user-attachments/assets/5b5098c0-65e5-4a93-ab09-1388fed04cf6" />  
+
+### 一個好的感測模擬器，應該具備哪些特性
+
+#### Spatial Consistency
+當兩個位置很靠近時，它們的無線通道應該相似  
+* 「大尺度空間一致性」：兩個空間相近的位置上，功率衰減、延遲擴展和角度擴展都應該一致。這些是「統計性特徵」
+* 「小尺度空間一致性」表示：在兩個接近的位置上，每條 multipath 的延遲與角度都應一致。
+
+
+#### Time Consistency
+當發射器、接收器或被觀測對象，在時間上只移動一點點時，無線通道應該是連續平滑變化  
+* Deterministic time consistency： 當系統元件（TX、RX 或目標）緩慢移動時，通道的變化也應該是平滑且連續
+* Stochastic time consistency: 則反映真實世界中，即使裝置不動，環境也不是完全靜止。
+
+
+#### Micro-Doppler Consistency
+人體中非剛體部分的動作（像手臂擺動、腿部彎曲等）在雷達信號上造成的細微頻移，所以一個好的感測模擬器，必須能夠模擬出「這些非剛體造成的細微頻率變化」   
+* 在雷達的 time-frequency spectrogram 中，每一種動作（如走路、跑步）都會產生獨特的「頻率-時間曲線」
+* 這些曲線就是「動作指紋（fingerprints）」，而且這些特徵非常依賴正確的 micro-Doppler 模擬
+
+#### Sensing Uncertainty
+spectrogram 裡還許多「亮點」、「模糊點」——這些是隨機性的 micro-Doppler shift。
+* 這種「不穩定、不可預測的變化」稱為 sensing uncertainty，來源可能是：衣物飄動、突發動作、環境物體干擾等。    
+* 它是 radar sensing 任務中必要的挑戰元素，用來測試演算法的健壯性（robustness）。
+
+#### Comparison with Existing Channel Models
+
+目前主流的無線通道模型可分為三大類：
+1. 統計模型（Statistical): 只描述整體通道的統計性質，如衰減平均值、delay spread 分布等。
+2. 決定性模型（Deterministic): 根據實際幾何位置、材質等精確模擬通道反應（如 ray tracing）。
+3. 準決定性模型（Quasi-deterministic）:以幾何決定為主，但仍加上統計參數進行調整，常用於產業標準（如 3GPP/ITU）。
+
+<img width="974" height="327" alt="image" src="https://github.com/user-attachments/assets/1d4a5460-41a5-46d0-9e91-516e70a71b3e" />
+
+***
+
+
