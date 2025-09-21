@@ -4,8 +4,78 @@
 不知道該如何設計碩論的 AI model  
 
 ## 問題解決了嗎?怎麼解決的?
-Ans:  
+Ans: 大致知道流程如下:  
+- **PBAH 模型** → 可生成 realistic 的雷達回波資料  
+- **DSN 模型** → 在動作辨識 (HMR) 上顯著優於 CNN
 
+### 資料生成流程
+
+資料來源並不是單純的實驗收集，而是 **虛擬數據生成**，具體步驟如下：
+
+####  通道建模
+
+$h_i(t) = u_i(t) + v_i(t)$
+
+- 有用通道 $u_i(t)$：primitive-based → 人體被切成 **B 個 primitives**，每個 primitive 當作散射點（ray），根據  
+  - 位置 \(D_b(t)\)  
+  - RCS \(G_b(t)\)  
+  來計算反射。
+
+- 干擾通道 $v_i(t)$：autoregressive + IEEE 802.11ax 通道模擬器  
+   - 模擬牆壁與靜態物體的多徑反射，並引入時間演化。
+
+---
+
+#### 雷達接收信號
+
+$r_i(t, m) = h_i(t, m) * s_i(t) + n_i(t)$
+
+- $s_i(t)$：FMCW 發射訊號  
+- $h_i(t, m)$：由上面通道模型生成  
+- $n_i(t)$：AWGN
+-  得到模擬的「回波訊號」序列。
+
+#### 資料轉換成特徵
+
+1. 對回波做 **採樣 → 向量化**  
+2. **SVD 去除雜訊/牆壁干擾**  
+3. **STFT → 轉換成 spectrogram（時頻圖像）**  
+
+👉 最後的資料集就是 **spectrogram 影像**，每一張對應一個動作（例：成人走路、小孩站立）。
+
+---
+
+### 任務判斷（分類流程）
+
+#### 任務定義
+目標任務 = **Human Motion Recognition (HMR)**
+
+- **輸入**：spectrogram（由回波信號生成）  
+- **輸出**：動作類別（成人走路、成人 pacing、小孩走路、小孩 pacing、成人/小孩站立）
+
+---
+
+#### 模型設計：DSN (Deep Spectrogram Network)
+
+- **特徵抽取 backbone**：ResNet 結構（多個 residual blocks）  
+- **輸入**：STFT spectrogram  
+- **輸出**：Softmax → 動作分類  
+
+---
+
+#### 訓練過程
+
+- 損失函數：交叉熵 (Cross-Entropy)  
+- 優化器：Momentum Optimizer (lr=0.06, batch size=500)  
+- 訓練 epochs = 500 → 收斂  
+
+---
+
+#### 成果
+
+- **CNN baseline**：錯誤率 = 17.4%  
+- **DSN**：錯誤率 = **9.8%**
+-  DSN 較 CNN 提升了將近一倍精度。
 
 ***
 
