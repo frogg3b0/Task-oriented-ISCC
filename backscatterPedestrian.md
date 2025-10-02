@@ -80,7 +80,7 @@ pedest = backscatterPedestrian( ...
 
 ---
 
-### 3. `move` 回傳 16 個部位的位置與速度，然後將行人移動提前兩秒鐘。
+### 3-1 `move` 回傳 16 個部位的位置與速度，然後將行人移動提前兩秒鐘。
 
 ```matlab
 [bppos,bpvel,bpax] = move(pedest,2,0);
@@ -90,11 +90,50 @@ pedest = backscatterPedestrian( ...
 * 第三個參數 0 = 朝向（heading），單位度，這裡表示沿 +x 方向走
 
 ---
-### 4. 傳送第一個脈衝到行人 (對應到 OFDM 則是第一個 Symbol)
+### 3-2 傳送第一個脈衝到行人 (對應到 OFDM 則是第一個 Symbol)
 
 ```matlab
 radarpos = [0;0;0];                                             % 雷達位置
 xp = channel(repmat(x,1,16), radarpos, bppos, [0;0;0], bpvel);  % 把一個 Tx 信號複製成 16 個 column ，對應到行人各個身體部位
 [~, ang] = rangeangle(radarpos, bppos, bpax);                   % 
 y0 = reflect(pedest, xp, ang);
+```
+* `repmat(x,1,16)`: 把發射波形複製成 SampleRate × 16，分別送到 16 個身體部位。
+* `channel(...)` : 模擬波形傳到這 16 個部位的路徑效應，輸出還是  SampleRate × 16
+* `y0 = reflect(pedest,xp,ang)` :自動把這 16 個通道的反射波 加總成一條回波，輸出是 SampleRate × 1。
+
+* `channel`: `phased.FreeSpace` 物件，功能是模擬 雷達到目標的傳播，它會根據：
+    * 雷達位置 (radarpos = [0;0;0])
+    * 目標位置 (bppos, 每個身體部位的 3D 座標)
+    * 目標速度 (bpvel)
+    * 幫每個部位加上 delay、path loss、Doppler shift
+
+* `rangeangle`: 計算「從雷達出發到達每個身體部位的角度 」(azimuth, elevation)
+    * `ang` 的維度是 2 × 16：每個部位都有一組 (az, el)
+
+* `reflect()`:模擬每個部位反射回雷達的信號
+    * 輸入：xp (傳到身體的信號 [Nsamp × 16])、ang (每個部位的入射角)
+    * 輸出：y0 (每個部位反射回來的信號 [Nsamp × 16])
+
+---
+
+### 4-1 `move` 回傳 16 個部位的位置與速度，然後將行人移動提前兩秒鐘。
+### 4-2 傳送第二個脈衝到行人 (對應到 OFDM 則是第二個 Symbol)
+
+---
+
+
+# 延伸思考: 如何將 `wav()` 換成 MIMO-OFDM
+
+## [Apply OFDM in MIMO Simulation](https://www.mathworks.com/help/comm/ug/ofdm-with-mimo-simulation.html)
+
+<img width="462" height="66" alt="image" src="https://github.com/user-attachments/assets/a1f664e8-a7b3-4634-be3c-f850623b763b" />
+
+```matlab
+ofdmMod = comm.OFDMModulator(
+    FFTLength=128, ...
+    PilotInputPort=false, ...  % 沒有導頻符號，只有 𝑠_𝑢𝑛,𝑝資料 → 所以 PilotInputPort=false                                       
+    NumSymbols=14, ...
+    InsertDCNull=false, ...    % 所有子載波都在用，沒有保留 DC → 所以 InsertDCNull=false
+    NumTransmitAntennas=2);
 ```
