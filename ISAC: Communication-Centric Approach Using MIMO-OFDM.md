@@ -304,3 +304,24 @@ preamble = repmat(preamble, 1, 1, Ntx);           % repmat 把這個序列複製
 ### 已經為每根天線分配好 subcarrier 去塞入 preamble，並且也知道每個 subcarrier 上的 preamble 的值
 ### 接著就是要用該 symbol 上的所有 subcarrier 的 preamble 
 
+```matlab
+preambleMod = comm.OFDMModulator(
+    "CyclicPrefixLength", cyclicPrefixLength,...
+    "FFTLength", Nsub,...
+    "NumGuardBandCarriers", numGuardBandCarriers,...
+    "NumSymbols", 1,...                                % 因為 preamble 只需要一個 OFDM 符號。
+    "NumTransmitAntennas", Ntx,...
+    "PilotCarrierIndices", preambleIdxs,
+    "PilotInputPort", true);
+
+preambleInfo = info(preambleMod);                      % 取得這個 modulator 的結構資訊，特別是 Data 輸入大小、Pilot 輸入大小 
+
+```
+
+### 建立 OFDM 解調器
+```matlab
+preambleDemod = comm.OFDMDemodulator(preambleMod);
+preambleDemod.NumReceiveAntennas = Nrx;
+```
+
+### 把 preamble 實際發出去 → 經過通
