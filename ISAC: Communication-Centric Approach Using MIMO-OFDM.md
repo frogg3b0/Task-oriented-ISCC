@@ -292,4 +292,15 @@ end
 ### 前面已經為每根天線分配好 subcarrier 去塞入 preamble
 ### 接下來要定義每個 subcarrier 上的 preamble
 
-使用已知序列作為前導碼
+使用已知序列作為前導碼   
+
+
+```matlab
+preamble = mlseq(Nsub - 1);                       % MLS 特性：像隨機序列，但自相關性很好，非常適合做 通道估計
+preamble = preamble(1 : numPreambleSubcarriers);  % 只取前 numPreambleSubcarriers 個元素
+preamble = repmat(preamble, 1, 1, Ntx);           % repmat 把這個序列複製到每一根發射天線 (所有天線用相同的值，但因為前面已經分配了不同的子載波索引)
+```
+
+### 已經為每根天線分配好 subcarrier 去塞入 preamble，並且也知道每個 subcarrier 上的 preamble 的值
+### 接著就是要用該 symbol 上的所有 subcarrier 的 preamble 
+
