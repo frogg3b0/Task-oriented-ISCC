@@ -317,6 +317,8 @@ preambleMod = comm.OFDMModulator(
 preambleInfo = info(preambleMod);                      % 取得這個 modulator 的結構資訊，特別是 Data 輸入大小、Pilot 輸入大小 
 
 ```
+**我們有了一個「專門發 preamble 的 OFDM 調變器」**  
+
 
 ### 建立 OFDM 解調器
 ```matlab
@@ -324,4 +326,345 @@ preambleDemod = comm.OFDMDemodulator(preambleMod);
 preambleDemod.NumReceiveAntennas = Nrx;
 ```
 
-### 把 preamble 實際發出去 → 經過通
+* `preambleDemod = comm.OFDMDemodulator(preambleMod);`
+    * 直接複製調變器的設定，建立一個解調器，確保參數一致。
+    * 這樣它就知道如何把接收到的信號拆回子載波、拆回每根天線的 pilot。
+
+preambleDemod.NumReceiveAntennas = Nrx;
+
+設定接收天線數 = 8。
+
+👉 結果：我們有了一個能「解析 preamble 符號」的解調器。  
+
+### 整體流程總結
+1. 用 MLS 生成一組已知序列
+2. 複製給所有天線，但每根天線的子載波位置不同（靠 preambleIdxs 分配）
+3. 用 comm.OFDMModulator 把 preamble 映射到子載波並加上 CP → 轉成時域信號
+4. 收到信號後，用 comm.OFDMDemodulator 拆解，恢復每根天線的 pilot → 拿來做初始通道估計
+
+### 把 preamble 實際發出去 → 經過通道
+
+1. 生成發射的 preamble 訊號
+
+```matlab
+preambleSignal = preambleMod(zeros(preambleInfo.DataInputSize), preamble);
+
+```
+* 進行通道偵測時，幾乎所有子載波都用於前導碼，因此將剩餘子載波置零
+
+2. 模擬發射
+
+```matlab
+txSignal = transmitter(preambleSignal);
+```
+* 這裡呼叫了先前建立的： `transmitter = phased.Transmitter('PeakPower', peakPower, 'Gain', 0);`
+    * 它會把信號乘上對應的發射功率與增益
+    * `txSignal` = 實際輸出的基帶信號
+ 
+3. 經過散射通道
+
+```matlab
+channelSignal = channel(txSignal, [scattererPositions targetPositions],...
+    [zeros(size(scattererPositions)) targetVelocities],...
+    [scattererReflectionCoefficients targetReflectionCoefficients]);
+```
+
+channel 是 `phased.ScatteringMIMOChannel` 物件  
+
+* 輸入：
+    * txSignal → 你剛送出的多天線 OFDM preamble
+    * [scattererPositions targetPositions] → 場景中所有散射體的位置（靜態 + 目標）
+    * [zeros(size(scattererPositions)) targetVelocities] → 靜態散射體速度 = 0，目標有各自速度
+    * [scattererReflectionCoefficients targetReflectionCoefficients] → 每個散射體的反射係數（複數，代表反射強度與相位）
+ 
+* 它在做什麼：
+    * 模擬每條多徑的延遲、Doppler shift、相位旋轉、以及不同 Tx–Rx 路徑的疊加，產生對應的「多天線接收信號」。
+    * 結果：channelSignal = 經過環境散射後，到達接收端的多通道基帶信號
+ 
+4. 加上接收雜訊
+
+```matlab
+rxSignal = receiver(channelSignal);
+```
+
+* `receiver(channelSignal)`: 它會在信號中加入符合熱噪聲模型的隨機雜訊：𝑁0=𝑘𝑇⋅𝐹
+* `rxSignal` = 通道傳遞後、再加上接收端熱雜訊的實際接收信號
+
+5. OFDM 解調
+```matlab
+[~, rxPreamblePilots] = preambleDemod(rxSignal);
+```
+
+* 使用前面建立的 OFDM 解調器 (preambleDemod)
+* 功能：
+    * 去除 CP
+    * 做 FFT → 回到頻域
+    * 把各天線、各子載波上的 pilot 值拆出來
+
+* 輸出：
+    * 第一個輸出（Data symbols）我們不要，所以用 ~ 忽略
+    * 第二個輸出 → rxPreamblePilots，就是 接收到的 pilot 值
+    * 👉 這是實際接收到的「量測值」，接下來要跟原本的已知 preamble 比對，推回通道
+ 
+6. 估計通道矩陣
+```matlab
+channelMatrix = helperInterpolateChannelMatrix(Nsub, numGuardBandCarriers, squeeze(preamble), squeeze(rxPreamblePilots), preambleIdxs);
+```
+* 這個 helper function 幫你做「通道估計」
+* 結果：`channelMatrix` 是一個三維 RDA 矩陣
+
+7. 計算 precoding / combining 權重
+
+```MATLAB
+[Wp, Wc, ~, G] = diagbfweights(channelMatrix);
+```
+* diagbfweights 會根據通道矩陣求出：
+    * Wp：發射端 precoding 權重
+    * Wc：接收端 combining 權重
+    * G：等效通道增益矩陣
+    * 👉 這些權重之後會被用在 Data subframe 的資料傳輸與感測信號接收中。
+
+### 使用 preamble 估計通道總結
+* 模擬一個完整的 MIMO–OFDM 初始通道探測流程： 「已知 preamble → 通道 → 解調 → 比對 → 得到通道矩陣與 beamforming 權重。」
+
+---
+
+## Data Frame Transmission
+* 在完成了 初始通道 (preamble) 之後，開始正式傳送資料（subframe A）以及為後續感測準備新的 pilots
+
+1. 建立建立 OFDM 調變器與解調器（Subframe A）
+
+```matlab
+% Subframe A contains only data
+subframeAMod = comm.OFDMModulator(
+    "CyclicPrefixLength", cyclicPrefixLength,...
+    "FFTLength", Nsub,...
+    "NumGuardBandCarriers", numGuardBandCarriers,...
+    "NumTransmitAntennas", Ntx,...
+    "NumSymbols", subframeALength);                  % 計算 subframe A 的時間長度（以符號為單位）
+subframeAInfo = info(subframeAMod);
+
+subframeADemod = comm.OFDMDemodulator(subframeAMod);
+subframeADemod.NumReceiveAntennas = Nrx;
+```
+* 一個「frame」裡面分成：
+    * Subframe A：只傳 data symbols
+    * Subframe B：同時傳 data + pilots（用來做感測與通道更新）
+
+* 所以這裡先建的是 subframe A 的 OFDM 調變器/解調器
+
+2. 安排 pilot 子載波索引/生成各天線的 Pilot 序列
+
+```matlab
+pilotIdxs = [
+    (numGuardBandCarriers(1)+1):Mf:(Nsub/2),...
+    (Nsub/2+2):Mf:(Nsub-numGuardBandCarriers(2))]';
+
+pilots = zeros(numel(pilotIdxs), Ntx, Ntx);
+for itx = 1:Ntx
+    s = mlseq(Nsub-1, itx);
+    pilots(:, itx, itx) = s(1:numel(pilotIdxs));
+end
+```
+
+
+---
+* Subframe B 用來同時傳資料與 pilot（既要維持通訊，也要更新通道給感測使用）。
+* 一個 frame = Subframe A + Subframe B。
+    * A：純 data
+    * B：data + pilots
+  
+1. 建立建立 OFDM 調變器與解調器（Subframe B）
+
+```MATLAB
+subframeBMod = comm.OFDMModulator(
+    "CyclicPrefixLength", cyclicPrefixLength,...
+    "FFTLength", Nsub,...
+    "NumGuardBandCarriers", numGuardBandCarriers,...
+    "NumTransmitAntennas", Ntx,...
+    "NumSymbols", Ntx,...                                 % 每根發射天線各佔用 1 個 OFDM symbol 來發 pilot。若 Ntx = 8 → Subframe B = 8 個 OFDM symbols
+    "PilotCarrierIndices", pilotIdxs,...                  % 前一步設計的 pilot 子載波位置
+    "PilotInputPort", true);
+subframeBInfo = info(subframeBMod);
+
+subframeBDemod = comm.OFDMDemodulator(subframeBMod);
+subframeBDemod.NumReceiveAntennas = Nrx;
+
+subframeBdataSubcarrierIdxs = setdiff(numGuardBandCarriers(1)+1:(Nsub-numGuardBandCarriers(2)), pilotIdxs); % 決定 Subframe B 的 Data 子載波索引
+```
+* `subframeBMod`: 能產生同時包含 data + pilot 的 OFDM 波形
+* `subframeBDemod`: 能對應拆回頻域資料與 pilot 值
+
+
+2. 計算速度解析度 (velocity resolution)
+
+```MATLAB
+Nframe = 24;                                                                                % 連續 Nframe 個 OFDM frame 做「coherent processing」
+fprintf("Velocity resolution: %.2f (m/s).\n", dop2speed(1/(Nframe*Tofdm*Mt), waveLength));  % Velocity resolution = 4.21 m/s
+```
+
+3. 設定調變階數（64-QAM）
+
+```MATLAB
+bitsPerSymbol = 6;           % 每個QAM符號可攜帶6bit
+modOrder = 2^bitsPerSymbol;  % 調變階數=64
+```
+
+---
+
+4. 定義 Spatial multiplexing gain
+
+* 在 MIMO-OFDM 系統裡，若環境有足夠多的散射路徑（rich scattering environment），每根發射天線和接收天線間的通道矩陣 𝐻 可能是「滿秩（full-rank）」的。
+    * 這代表不同天線組合能形成互不干擾的「空間通道（spatial channels）」
+    * 因此可以同時傳送多筆獨立資料，稱為 spatial multiplexing
+
+```matlab
+numDataStreams = 2;  % 發送兩條獨立的資料流
+```
+
+5. 計算每個 OFDM 調變器的輸入資料大小
+
+```matlab
+% Input data size for subframe A
+subframeAInputSize = [subframeAInfo.DataInputSize(1) subframeAInfo.DataInputSize(2) numDataStreams];
+
+% Input data size for subframe B
+subframeBInputSize = [subframeBInfo.DataInputSize(1) subframeBInfo.DataInputSize(2) numDataStreams];
+```
+
+6. 為「雷達資料立方（Radar Data Cube）」預留空間
+
+```matlab
+radarDataCube = zeros(numActiveSubcarriers, Nrx, Nframe);
+```
+* 這是一個三維矩陣，維度如下：
+    * `numActiveSubcarriers`: 頻率維度
+    * `Nrx`: 接收天線維度
+    * `Nframe`: 時間維度
+ 
+* 在每個 frame 結束後，新的通道估計結果會存入這個 cube 的下一頁 (page)，最後就能用 FFT 或 MUSIC 等方法去估計目標的距離、速度與方向。
+
+---
+
+模擬每一個 frame 的：
+* 資料生成與 QAM 調變
+* Precoding（空間資料流映射）
+* OFDM 調變與實際傳送
+* 通道傳播（含目標移動與散射）
+* 接收、解調、合併（Combining）
+* BER 計算
+* 通道重估（更新 precoder/combiner）
+* 雷達資料立方更新
+
+
+```matlab
+for i = 1:Nframe
+    %%
+    % 隨機產生要傳的二進位資料（payload），使用 64-QAM 調變成複數符號
+    subframeABin = randi([0,1], [subframeAInputSize(1) * bitsPerSymbol subframeAInputSize(2) numDataStreams]);
+    subframeAQam = qammod(subframeABin, modOrder, 'InputType', 'bit', 'UnitAveragePower', true);
+    
+    %%
+    % 使用 precoder 𝑊 將兩條 data streams 映射到八根發射天線。
+    subframeAQamPre = zeros(size(subframeAQam, 1), subframeALength, Ntx);
+    for nsc = 1:numActiveSubcarriers
+        subframeAQamPre(nsc, :, :) = squeeze(subframeAQam(nsc, :, :))*squeeze(Wp(nsc, 1:numDataStreams,:));
+    end
+    
+    %%
+    % Subframe A：OFDM 調變
+    subframeA = subframeAMod(subframeAQamPre);
+
+    %%
+    % Subframe B：資料 + Pilot 的組合與傳送準備，這一段幾乎重複 Subframe A 的步驟，但多了 pilot
+    subframeBBin = randi([0,1], [subframeBInputSize(1) * bitsPerSymbol subframeBInputSize(2) numDataStreams]);
+    subframeBQam = qammod(subframeBBin, modOrder, 'InputType', 'bit', 'UnitAveragePower', true);
+
+    % Precodding
+    subframeBQamPre = zeros(size(subframeBQam, 1), Ntx, Ntx);    
+    for nsc = 1:numel(subframeBdataSubcarrierIdxs)
+        idx = subframeBdataSubcarrierIdxs(nsc) - numGuardBandCarriers(1);
+        subframeBQamPre(nsc, :, :) = squeeze(subframeBQam(nsc, :, :))*squeeze(Wp(idx, 1:numDataStreams,:));
+    end
+
+    % 加上 pilot（for sensing + channel estimation）
+    subframeB = subframeBMod(subframeBQamPre, pilots);
+
+    % Binary data transmitted in the ith frame
+    txDataBin = cat(1, subframeABin(:), subframeBBin(:));
+    
+    % Reshape and combine subframes A and B to transmit the whole frame
+
+    %%
+    % 每個 frame = [Subframe A | Subframe B]。
+    % 把整個 frame 合成時間序列訊號矩陣 [Sample × Symbols × Ntx] Precode data subcarriers for subframe B
+    subframeA = reshape(subframeA, ofdmSymbolLengthWithCP, subframeALength, []);
+    subframeB = reshape(subframeB, ofdmSymbolLengthWithCP, Ntx, []);
+    ofdmSignal = [subframeA subframeB];
+
+    % Preallocate space for the received signal
+    rxSignal = zeros(size(ofdmSignal, 1), size(ofdmSignal, 2), Nrx);
+
+    % Transmit one OFDM symbol at a time
+    for s = 1:size(ofdmSignal, 2)
+        % 更新目標位置與速度
+        [targetPositions, targetVelocities] = targetMotion(Tofdm);
+
+        % Transmit signal
+        txSignal = transmitter(squeeze(ofdmSignal(:, s, :)));        
+        
+        % 經過多路散射通道
+        channelSignal = channel(txSignal, [scattererPositions targetPositions],...
+            [zeros(size(scattererPositions)) targetVelocities],...
+            [scattererReflectionCoefficients targetReflectionCoefficients]); 
+        
+        % 加入熱雜訊
+        rxSignal(:, s, :) = receiver(channelSignal);
+    end
+
+    % Separate the received signal into subframes A and B
+    rxSubframeA = rxSignal(:, 1:subframeALength, :);
+    rxSubframeA = reshape(rxSubframeA, [], Nrx);
+
+    rxSubframeB = rxSignal(:, subframeALength+1:end, :);
+    rxSubframeB = reshape(rxSubframeB, [], Nrx);
+
+    % OFDM 解調
+    rxSubframeAQam = subframeADemod(rxSubframeA);
+    rxSubframeAQamComb = zeros(size(rxSubframeAQam, 1), size(rxSubframeAQam, 2), numDataStreams);
+
+    for nsc = 1:numActiveSubcarriers
+        rxSubframeAQamComb(nsc, :, :) = ((squeeze(rxSubframeAQam(nsc, :, :))*squeeze(Wc(nsc, :, 1:numDataStreams))))./sqrt(G(nsc,1:numDataStreams));
+    end
+
+    % Demodulate subframe B and apply the combining weights
+    [rxSubframeBQam, rxPilots] = subframeBDemod(rxSubframeB);
+    rxSubframeBQamComb = zeros(size(rxSubframeBQam, 1), size(rxSubframeBQam, 2), numDataStreams);
+
+    for nsc = 1:numel(subframeBdataSubcarrierIdxs)
+        idx = subframeBdataSubcarrierIdxs(nsc) - numGuardBandCarriers(1);
+        rxSubframeBQamComb(nsc, :, :) = ((squeeze(rxSubframeBQam(nsc, :, :))*squeeze(Wc(idx, :, 1:numDataStreams))))./sqrt(G(idx, 1:numDataStreams));
+    end
+
+    % Demodulate the QAM data and compute the bit error rate for the ith
+    % frame
+    rxDataQam = cat(1, rxSubframeAQamComb(:), rxSubframeBQamComb(:));
+    rxDataBin = qamdemod(rxDataQam, modOrder, 'OutputType', 'bit', 'UnitAveragePower', true);
+    [~, ratio] = biterr(txDataBin, rxDataBin);
+    fprintf("Frame %d bit error rate: %.4f\n", i, ratio);
+
+    % 使用 subframe B 的 pilot 進行通道估計
+    channelMatrix = helperInterpolateChannelMatrix(Nsub, numGuardBandCarriers, pilots, rxPilots, pilotIdxs);
+    
+    % 更新 precoder / combiner，準備下個 frame
+    [Wp, Wc, ~, G] = diagbfweights(channelMatrix);
+
+    % Store the radar data
+    radarDataCube(:, :, i) = squeeze(sum(channelMatrix, 2));    
+end
+```  
+
+---
+
+## Radar Data Processing
+
