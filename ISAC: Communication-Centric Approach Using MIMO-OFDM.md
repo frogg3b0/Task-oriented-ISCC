@@ -668,3 +668,23 @@ end
 
 ## Radar Data Processing
 
+### 把通訊過程中「估得的 channel matrices」當成雷達回波，進行 range–Doppler–angle 分析
+
+```matlab
+Y = fft(radarDataCube, [], 3);  % 在慢時間（frame）做 FFT 
+Y(:, :, 1) = 0;                 % 把靜態散射體移除
+y = ifft(Y, Nframe, 3);         % IFFT 回時域
+```
+
+### 利用 MIMO 幾何結構 + array steering；根據已知的 Tx / Rx 位置、方向；把回波功率映射到空間座標 (x,y)。 
+```matlab
+phm = helperPositionHeatmap('ReceiveArray', rxArray, 'ReceiveArrayOrientationAxis', rxOrientationAxis, 'ReceiveArrayPosition', rxPosition, ...
+    'SampleRate', sampleRate, 'CarrierFrequency', carrierFrequency, 'Bandwidth', bandwidth, 'OFDMSymbolDuration', ofdmSymbolDuration, ...
+    'TransmitArrayOrientationAxis', txOrientationAxis, 'TransmitArrayPosition', txPosition, 'TargetPositions', targetPositions, 'ROI', [0 120; -80 80]);
+
+figure;
+phm.plot(y)
+title('Moving Scatterers')
+```
+
+
