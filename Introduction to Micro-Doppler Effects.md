@@ -89,4 +89,178 @@ rxant = phased.Collector(            % 模擬天線收集空間信號
 ```
 
 ---
+### 初始化與變數定義
+```matlab
+NSampPerPulse = round(fs/prf);               % 每個脈衝取樣點數    
+Niter = 1e4;                                 % 模擬 pulse 數 (0.5 秒)
+y     = complex(zeros(NSampPerPulse,Niter)); % 接收信號矩陣 (大小 50×10000)
+rng(2018);                                   % 固定隨機種子 
+```
 
+
+### 這段程式的邏輯是建立一個迴圈：每個 pulse（脈衝重複週期）內：
+1. 更新直升機位置與葉片角度
+2. 產生發射波形
+3. 傳播 → 散射 → 回傳 → 接收
+4. 累積接收波形矩陣 𝑦(:,𝑚)
+
+
+```matlab
+for m = 1:Niter
+    % 更新散射中心的即時位置與速度
+    t = (m-1)/prf;                 % 第 m 個 pulse 的絕對時間點
+    [scatterpos,scattervel,scatterang] = helicopmotion(t,tgtmotion,bladeang,bladelen,bladerate);
+
+    % simulate echo
+    x  = txant(tx(wav()),scatterang);                    % transmit
+    xt = env(x,radarpos,scatterpos,radarvel,scattervel); % propagates to/from scatterers
+    xt = helicop(xt);                                    % reflect
+    xr = rx(rxant(xt,scatterang));                       % receive
+    y(:,m) = sum(xr,2);                                  % 針對 16 個天線輸出求和，得到單一複數波形對應第 m 個 pulse
+end
+```
+
+### Range–Doppler Response 可視化
+
+```matlab
+rdresp  = phased.RangeDopplerResponse(         % 計算並顯示Range–Doppler Map
+    'PropagationSpeed',c,...
+    'SampleRate',fs,...                        % 快時間取樣率
+    'DopplerFFTLengthSource','Property',... 
+    'DopplerFFTLength',128,...                 % 對慢時間 (pulse index) 做 128 點 FFT
+    'DopplerOutput','Speed',...                % 橫軸單位以「速度」顯示
+    'OperatingFrequency',fc);                  % 5 GHz，決定 λ 用於換算速度 
+
+mfcoeff = getMatchedFilter(wav);               % 自動生成與發射波形匹配的濾波器
+plotResponse(rdresp,y(:,1:128),mfcoeff);
+ylim([0 3000])
+```
+
+<img width="959" height="577" alt="image" src="https://github.com/user-attachments/assets/e7e0f392-66b1-4e93-993f-38949a2064b7" />
+
+* 在 Range–Doppler 圖上，我們看到三個明顯的回波峰值
+* 但實際上它們全部都來自同一個直升機目標的不同散射點
+
+
+### 計算主體的真實徑向速度
+
+```matlab
+tgtpos = scatterpos(:,1);
+tgtvel = scattervel(:,1);
+tgtvel_truth = radialspeed(tgtpos,tgtvel,radarpos,radarvel)
+```
+
+`tgtvel_truth = -43.6435`
+
+
+```matlab
+maxbladetipvel = [bladelen*bladerate;0;0];
+vtp = radialspeed(tgtpos,-maxbladetipvel+tgtvel,radarpos,radarvel)
+vtn = radialspeed(tgtpos,maxbladetipvel+tgtvel,radarpos,radarvel)
+```
+
+`vtp = 75.1853`    : 「葉尖朝向雷達」時的徑向速度
+`vtn = -162.4723`  : 「葉尖遠離雷達」時的徑向速度
+
+* 若我們不事先知道這些回波都屬於同一個物體，雷達偵測會誤以為有三個獨立目標。
+* 為了解決這個問題，後續可使用：Micro-Doppler feature extraction
+
+---
+
+## Blade Return Micro-Doppler Analysis
+
+* 在 Range–Doppler 圖 中，我們只能看到「某一段時間內的平均速度分佈」
+* 但 micro-Doppler 現象是 隨時間週期性變化的頻移
+* 因此需要一種可以顯示「頻率隨時間擺動」的工具 → Spectrogram
+
+
+```matlab
+mf  = phased.MatchedFilter('Coefficients',mfcoeff);
+ymf = mf(y);                             % 對所有 pulse 回波執行 matched filter     
+[~,ridx] = max(sum(abs(ymf),2));         % 找出目標距離在哪一格
+pspectrum(ymf(ridx,:),prf,'spectrogram') % 針對那個距離格做時間–頻率分析
+```
+
+<img width="959" height="577" alt="image" src="https://github.com/user-attachments/assets/9954ca64-e50f-415f-9e96-f36f8174ef01" />
+
+* 這張圖的 中心水平線代表直升機機身的固定 Doppler 頻率，而上下對稱的「波浪形」頻率曲線是由葉片旋轉所引起的 Doppler
+* 當葉片沿著圓軌道旋轉時，它在雷達視線方向的徑向速度 𝑣𝑟(𝑡) 會隨時間以餘弦形式變化
+* 在一個完整旋轉週期裡，你能看到有 4 條相位互相錯開的正弦曲線；這表示有 4 個葉尖
+* 這個週期= 250 ms 就是葉片轉一圈的時間
+* 在圖上，弧線的最高（或最低）頻率距離中心線約 ±4 kHz，這個偏移量反映葉尖的最大徑向速度
+
+---
+
+## 模擬汽車雷達辨識行人（FMCW-based micro-Doppler analysis）
+
+```matlab
+bw = 250e6;    % FMCW頻寬 = 250 MHz
+fs = bw;       % 取樣率設為頻寬
+fc = 24e9;     % 雷達載波頻率 = 24 GHz
+tm = 1e-6;     % Chirp掃頻時間 = 1 microsecond
+wav = phased.FMCWWaveform(   % 產生 FMCW chirp
+    'SampleRate',fs,...
+    'SweepTime',tm,...
+    'SweepBandwidth',bw);
+```
+
+### 定義「自車、停車、行人」的物理狀態與回波路徑
+
+```matlab
+egocar_pos = [0;0;0];                   % 自車的初始位置
+egocar_vel = [30*1600/3600;0;0];        % 自車速度
+
+% MATLAB 用來模擬運動平台的物件
+egocar = phased.Platform(
+    'InitialPosition',egocar_pos,...
+    'Velocity',egocar_vel,...
+    'OrientationAxesOutputPort',true);
+```
+### Parked car 停車目標設定
+
+```matlab
+parkedcar_pos = [39;-4;0];
+parkedcar_vel = [0;0;0];
+
+parkedcar = phased.Platform(
+    'InitialPosition',parkedcar_pos,...
+    'Velocity',parkedcar_vel,...
+    'OrientationAxesOutputPort',true);
+
+parkedcar_tgt = phased.RadarTarget(       % 定義一個雷達反射物體（可設定 RCS）
+    'PropagationSpeed',c,...
+    'OperatingFrequency',fc,...
+    'MeanRCS',10);                        % Radar Cross Section = 10 m²，表示金屬車體強反射回波
+
+```
+* 這輛車是一個靜止高反射體
+* 它會產生強烈的「固定距離、零 Doppler」回波。
+* 對雷達而言，這種固定反射體容易掩蓋掉附近弱小的移動物（例如行人）
+
+
+### Pedestrian 行人設定
+
+```matlab
+ped_pos = [40;-3;0];
+ped_vel = [0;1;0];
+ped_heading = 90;
+ped_height = 1.8;
+
+ped = phased.BackscatterPedestrian(
+    'InitialPosition',ped_pos,...
+    'InitialHeading',ped_heading,...
+    'PropagationSpeed',c,...
+    'OperatingFrequency',fc,...
+    'Height',1.6,'WalkingSpeed',1);
+
+chan_ped = phased.FreeSpace(
+    'PropagationSpeed',c,...
+    'OperatingFrequency',fc,...
+    'TwoWayPropagation',true,
+    'SampleRate',fs);
+
+chan_pcar = phased.FreeSpace(
+    'PropagationSpeed',c,...
+    'OperatingFrequency',fc,...
+    'TwoWayPropagation',true,'SampleRate',fs);
+```
