@@ -253,7 +253,7 @@ ped = phased.BackscatterPedestrian(
     'OperatingFrequency',fc,...
     'Height',1.6,'WalkingSpeed',1);
 
-chan_ped = phased.FreeSpace(
+chan_ped = phased.FreeSpace(          % 模擬自由空間傳播路徑（含距離衰減與 Doppler shift)
     'PropagationSpeed',c,...
     'OperatingFrequency',fc,...
     'TwoWayPropagation',true,
@@ -263,4 +263,58 @@ chan_pcar = phased.FreeSpace(
     'PropagationSpeed',c,...
     'OperatingFrequency',fc,...
     'TwoWayPropagation',true,'SampleRate',fs);
+
+tx = phased.Transmitter('PeakPower',1,'Gain',25);        % 定義雷達發射端功率、天線增益
+rx = phased.ReceiverPreamp('Gain',25,'NoiseFigure',10);  % 定義接收端增益、雜訊指數
 ```
+
+## Pedestrian Micro-Doppler Extraction
+* 下圖顯示了「自車雷達」隨時間產生的距離-多普勒圖。
+* 由於停放的車輛比行人更容易被識別，因此在距離-多普勒圖中，行人很容易被停放的車輛遮擋。
+* 因此，該圖始終顯示單一目標 (使用 STFT 的原因)
+
+```MATLAB
+Tsamp = 0.001;   % 每個回波間隔 = 1 ms
+npulse = 2500;   % 總共模擬 2500 次 chirp (相當於 2.5 秒)
+xr = complex(zeros(round(fs*tm),npulse));     % 接收信號矩陣（每列為一個 chirp）
+xr_ped = complex(zeros(round(fs*tm),npulse)); % 僅行人回波
+```
+
+```MATLAB
+for m = 1:npulse
+    [pos_ego,vel_ego,ax_ego] = egocar(Tsamp);
+    [pos_pcar,vel_pcar,ax_pcar] = parkedcar(Tsamp);
+
+    [pos_ped,vel_ped,ax_ped] = move(ped,Tsamp,ped_heading);
+
+    [~,angrt_ped] = rangeangle(pos_ego,pos_ped,ax_ped);
+    [~,angrt_pcar] = rangeangle(pos_ego,pos_pcar,ax_pcar);
+
+    x = tx(wav());
+    xt_ped = chan_ped(repmat(x,1,size(pos_ped,2)),pos_ego,pos_ped,vel_ego,vel_ped);
+    xt_pcar = chan_pcar(x,pos_ego,pos_pcar,vel_ego,vel_pcar);
+    xt_ped = reflect(ped,xt_ped,angrt_ped);
+    xt_pcar = parkedcar_tgt(xt_pcar);
+    xr_ped(:,m) = rx(xt_ped);
+    xr(:,m) = rx(xt_ped+xt_pcar);
+end
+
+xd_ped = conj(dechirp(xr_ped,x));   % xd_ped → beat signal 只含行人
+xd = conj(dechirp(xr,x));           % xd → beat signal 含行人 + 車輛  
+```
+
+---
+
+```MATLAB
+clf;
+spectrogram(sum(xd_ped),kaiser(128,10),120,256,1/Tsamp,'centered','yaxis');
+clim = get(gca,'CLim');
+set(gca,'CLim',clim(2)+[-50 0])
+```
+
+* `sum(xd_ped)`: 將行人所有反射點的信號加總成一條時間序列
+* `kaiser(128,10)`: Kaiser 窗，長度 128、β=10
+* `120`: 相鄰窗重疊 120 點
+* `256`: 每個 window 的 FFT 點數
+* 'centered': 將頻率零點置中顯示
+* 'yaxis': 把頻率設為縱軸
