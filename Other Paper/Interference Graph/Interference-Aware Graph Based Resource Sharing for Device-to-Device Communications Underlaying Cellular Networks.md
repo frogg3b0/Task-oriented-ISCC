@@ -79,3 +79,32 @@
 * resource attribute：包含兩個項目：L(Vᵢ)：依據接收 SNR 排序的 RB list、δ(Vᵢ)：目前最想要的 RB（list 的第一個）
 * cluster attribute（τ(Vᵢ））：這條 link 目前已經被分配到哪個 RB cluster
 * 這些新定義的屬性有助於控制基於幹擾感知圖的資源共享演算法的迭代過程
+
+---
+
+## System Model
+
+* 整個系統是 downlink 情境，代表 BS → cellular UE 是主要的下行通訊
+* 同時存在兩種通訊形式：
+    * BS -> UE
+    * D2D 
+
+* 本文聚焦的干擾是 intra-cell 干擾
+    * 干擾來源：D2D 與 cellular 共用相同 RB → 互相干擾
+    * 本文不考慮 cell 間的干擾
+ 
+* 系統中共有：
+    * M 個 cellular 使用者（UE）
+    * N 對 D2D pair
+    * 每一個 D2D pair 有兩個節點：
+        * Dₙ,ₜ：第 n 對 D2D transmit node
+        * Dₙ,ᵣ：第 n 對 D2D receive node
+
+* 全部共有 K 個 RB（resource blocks）
+    * 用 r = {RB₁, RB₂,…RBₖ} 來表示所有 RB 的集合
+    * 這些 RB 給 cellular 、D2D
+ 
+* 𝑀 = {1, 2, …, M}：所有 cellular UE 的 index set
+* 𝑁 = {1, 2, …, N}：所有 D2D pair 的 index set
+* 𝒜：所有 cellular UE 的集合 : 𝒜 = {A₁, A₂, …, Aₘ}
+* 𝒟：所有 D2D pair 的集合 : 𝒟 = {D₁, D₂, …, Dₙ} 
